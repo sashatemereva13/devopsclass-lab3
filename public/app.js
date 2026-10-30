@@ -28,9 +28,7 @@ function renderStations() {
   const term = ui.search.value.trim().toLowerCase();
   const result = stations.filter(s => {
     if (!s.name.toLowerCase().includes(term)) return false;
-    // BUG-101: A station with ZERO bikes is incorrectly treated as available.
-    // Students must catch this with a failing E2E test before fixing it.
-    if (ui.available.checked && s.bikes < 0) return false;
+    if (ui.available.checked && s.bikes <= 0) return false;
     return true;
   });
   ui.count.textContent = `${result.length} station${result.length === 1 ? '' : 's'}`;
