@@ -1,0 +1,168 @@
+diff --git a/.github/workflows/playwright.yml b/.github/workflows/playwright.yml
+index e3b6d50..48f4c5b 100644
+--- a/.github/workflows/playwright.yml
++++ b/.github/workflows/playwright.yml
+@@ -1,5 +1,6 @@
+ # MISSION 5 — Complete this workflow; submit a PR to trigger the quality gate.
+ name: CityBike E2E Quality Gate
++
+ on:
+   pull_request:
+     branches: [main]
+@@ -9,10 +10,30 @@ on:
+ jobs:
+   e2e:
+     runs-on: ubuntu-latest
++    timeout-minutes: 20
+     steps:
+-      - uses: actions/checkout@v6
+-      # TODO: set up Node.js 22
+-      # TODO: install npm packages
+-      # TODO: install Playwright Chromium and system dependencies
+-      # TODO: execute tests; a failing test must fail the job
+-      # TODO: upload the HTML report even when tests fail
++      - name: Check out repository
++        uses: actions/checkout@v6
++
++      - name: Set up Node.js 22
++        uses: actions/setup-node@v4
++        with:
++          node-version: "22"
++          cache: npm
++
++      - name: Install dependencies
++        run: npm ci
++
++      - name: Install Playwright Chromium and system dependencies
++        run: npx playwright install --with-deps chromium
++
++      - name: Run Playwright tests
++        run: npm run test:e2e
++
++      - name: Upload Playwright HTML report
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: playwright-report
++          path: playwright-report/
++          if-no-files-found: ignore
+diff --git a/public/app.js b/public/app.js
+index 6ac705e..2219d3a 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -28,9 +28,7 @@ function renderStations() {
+   const term = ui.search.value.trim().toLowerCase();
+   const result = stations.filter(s => {
+     if (!s.name.toLowerCase().includes(term)) return false;
+-    // BUG-101: A station with ZERO bikes is incorrectly treated as available.
+-    // Students must catch this with a failing E2E test before fixing it.
+-    if (ui.available.checked && s.bikes < 0) return false;
++    if (ui.available.checked && s.bikes <= 0) return false;
+     return true;
+   });
+   ui.count.textContent = `${result.length} station${result.length === 1 ? '' : 's'}`;
+diff --git a/tests/02-availability.spec.js b/tests/02-availability.spec.js
+index 2485d99..94e71da 100644
+--- a/tests/02-availability.spec.js
++++ b/tests/02-availability.spec.js
+@@ -4,6 +4,12 @@ const { test, expect } = require('@playwright/test');
+ // Behavior required: enabling "Available bikes only" hides Riverside Park (0 bikes)
+ // and shows exactly three station cards. Fix public/app.js only AFTER the test fails.
+ 
+-test.skip('BUG-101: available-only filter excludes zero-bike stations', async ({ page }) => {
+-  // TODO: replace test.skip with test and implement reliable locators and assertions.
++test('BUG-101: available-only filter excludes zero-bike stations', async ({ page }) => {
++  await page.goto('/');
++  await expect(page.getByTestId('station-card')).toHaveCount(4);
++
++  await page.getByRole('checkbox', { name: 'Available bikes only' }).check();
++
++  await expect(page.getByTestId('station-card')).toHaveCount(3);
++  await expect(page.getByRole('heading', { name: 'Riverside Park' })).toHaveCount(0);
+ });
+diff --git a/tests/03-reservation.spec.js b/tests/03-reservation.spec.js
+index 6fb2b32..17b7515 100644
+--- a/tests/03-reservation.spec.js
++++ b/tests/03-reservation.spec.js
+@@ -5,10 +5,41 @@ const { test, expect } = require('@playwright/test');
+ // (b) a successful reservation; intercept/mock POST /api/reservations and assert
+ //     the JSON request payload and success message.
+ 
+-test.skip('invalid email blocks reservation', async ({ page }) => {
+-  // TODO
++test('invalid email blocks reservation', async ({ page }) => {
++  let reservationRequested = false;
++  await page.route('**/api/reservations', async route => {
++    reservationRequested = true;
++    await route.continue();
++  });
++
++  await page.goto('/');
++  await page.getByRole('button', { name: 'Reserve at Central Square' }).click();
++  await page.getByRole('textbox', { name: 'Email address' }).fill('invalid-email');
++  await page.getByRole('button', { name: 'Confirm reservation' }).click();
++
++  await expect(page.getByRole('alert')).toContainText('Enter a valid email address.');
++  expect(reservationRequested).toBe(false);
+ });
+ 
+-test.skip('reservation sends correct payload and confirms booking', async ({ page }) => {
+-  // TODO
++test('reservation sends correct payload and confirms booking', async ({ page }) => {
++  let reservationPayload;
++  await page.route('**/api/reservations', async route => {
++    reservationPayload = route.request().postDataJSON();
++    await route.fulfill({
++      status: 201,
++      contentType: 'application/json',
++      body: JSON.stringify({ reservationId: 'CB-CENTRAL' })
++    });
++  });
++
++  await page.goto('/');
++  await page.getByRole('button', { name: 'Reserve at Central Square' }).click();
++  await page.getByRole('textbox', { name: 'Email address' }).fill('alice@example.com');
++  await page.getByRole('button', { name: 'Confirm reservation' }).click();
++
++  await expect(page.getByRole('status')).toHaveText('Reservation confirmed: CB-CENTRAL');
++  expect(reservationPayload).toEqual({
++    stationId: 'central',
++    email: 'alice@example.com'
++  });
+ });
+diff --git a/tests/04-outage.spec.js b/tests/04-outage.spec.js
+index d7b121e..6a32d01 100644
+--- a/tests/04-outage.spec.js
++++ b/tests/04-outage.spec.js
+@@ -3,6 +3,29 @@ const { test, expect } = require('@playwright/test');
+ // MISSION 4 — Mock the first /api/stations GET as 503, confirm the error banner,
+ // then let Retry loading reach the real server and recover to 4 stations.
+ 
+-test.skip('station API outage shows an error and retry restores results', async ({ page }) => {
+-  // TODO
++test('station API outage shows an error and retry restores results', async ({ page }) => {
++  let stationRequestCount = 0;
++  await page.route('**/api/stations', async route => {
++    stationRequestCount += 1;
++
++    if (stationRequestCount === 1) {
++      await route.fulfill({
++        status: 503,
++        contentType: 'application/json',
++        body: JSON.stringify({ error: 'Service unavailable' })
++      });
++      return;
++    }
++
++    await route.continue();
++  });
++
++  await page.goto('/');
++
++  await expect(page.getByRole('alert')).toContainText('Unable to load stations.');
++  await expect(page.getByTestId('station-card')).toHaveCount(0);
++
++  await page.getByRole('button', { name: 'Retry loading' }).click();
++  await expect(page.getByTestId('station-card')).toHaveCount(4);
++  expect(stationRequestCount).toBe(2);
+ });
